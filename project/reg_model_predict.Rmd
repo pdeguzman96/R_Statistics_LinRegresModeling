@@ -1,0 +1,312 @@
+---
+title: "Modeling and Prediction for Movies"
+output: 
+  html_document: 
+    fig_height: 4
+    highlight: pygments
+    theme: spacelab
+---
+
+## Setup
+
+### Load packages
+
+```{r load-packages, message = FALSE}
+library(MASS) 
+library(dplyr)
+library(statsr)
+library(reshape2)
+library(data.table)
+library(mltools)
+library(ggplot2)
+```
+
+### Load data
+
+```{r load-data}
+load("movies.Rdata")
+```
+
+
+
+* * *
+
+## Part 1: Data
+
+The data was collected by randomly sampling 615 movies that were released before 2016. Each observation is a movie, and each column represents features of that particular movie.
+
+- Because these movies were randomly sampled, we can generalize our findings to the greater population of all movies released before 2016.
+- However, given the nature of this study, causality can't be inferred because this is not designed as an experiment.
+- Note that sampling bias may be involved depending on *how exactly* the movies were sampled and whether all relevant features were included in the provided dataset.
+
+* * *
+
+## Part 2: Research question
+
+1. As a point of interest, I'd like to know if IMDB and Rotten Tomatoes "agree" on the quality of these movies. Do these websites rate movies similarly? I expect that movies are perceived, more or less, the same between both websites, so it would be very interesting to see large discrepancies.
+
+2. Ratings highly influence audience interest and, consequently, the amount of money movies can make. Out of the features provided, which are the most relevant for predicting ratings?
+
+Exploratory Data Analysis will suffice with answering Question 1. However, Question 2 will require some simple statistical modeling techniques using Feature Elimination and Multiple Linear Regression.
+
+* * *
+
+## Part 3: Exploratory data analysis
+
+First let's take a quick look at our data.
+
+```{r}
+str(movies)
+```
+
+For our first research question, we're interested in looking at each website's ratings, but it's difficult to compare them since they're on different scales. IMDB rating is from 1-10, and Rotten Tomatoes is from 1-100. Let's deal with this later when we address the question.
+
+First, I'll do a bit of cleaning!
+
+### Initial Cleaning
+
+So we have a mix of numerical columns and factors/characters. I prefer to turn the 2-level factors into binary numbers.
+
+Additionally, I noticed that `thtr_rel_year` and `dvd_rel_year` are numerical, but are relatively large numbers (~1900s and 2000s) that can distort the predictive power of the linear model that I plan to build later. So, as a "quick and dirty" fix to scale these values down, I'm going to subtract the minimum value of these features so that the oldest movies are 0 and most recent movies are greater than 0.
+
+```{r}
+# Changing each of these columns to be values of either 0 or 1
+movies <- movies %>% 
+  mutate(audience_rating = as.numeric(movies$audience_rating)-1) %>%
+  mutate(best_pic_nom = as.numeric(movies$best_pic_nom)-1) %>%
+  mutate(best_pic_win = as.numeric(movies$best_pic_win)-1) %>%
+  mutate(best_actor_win = as.numeric(movies$best_actor_win)-1) %>%
+  mutate(best_actress_win = as.numeric(movies$best_actress_win)-1) %>%
+  mutate(best_dir_win = as.numeric(movies$best_dir_win)-1) %>%
+  mutate(top200_box = as.numeric(movies$top200_box)-1)
+
+# Modifying year features to scale down by subtracting minimum
+movies <- movies %>%
+  mutate(thtr_rel_year = thtr_rel_year - min(thtr_rel_year,na.rm = TRUE)) %>%
+  mutate(dvd_rel_year = dvd_rel_year - min(dvd_rel_year,na.rm = TRUE))
+```
+
+I'd like to separate all my features into a separate numerical column DF and categorical column DF.
+
+
+```{r}
+# Separating into numerical columns and categorical columns to help me organize analysis
+num_movies <- movies %>% select_if(function(col) is.numeric(col))
+cat_movies <- movies %>% select_if(function(col) is.factor(col)| is.character(col))
+```
+
+Let's make sure we have all columns accounted for, then see how many unique values we have for the categorical columns.
+
+```{r}
+# Sanity check
+length(cat_movies) + length(num_movies) == length(movies)
+
+# Checking unique values
+apply(cat_movies,2, function(x) length(unique(x)))
+
+# I don't think we need a lot of these features. Some of these categoricals have so many unique values. I'll keep track of the columns I want to drop in this vector.
+cols_to_drop <- c('title','imdb_url','rt_url','actor1','actor2','actor3','actor4','actor5','studio','director')
+```
+
+### Research Question 1
+
+***Do these websites (Rotten Tomatoes & IMDB) rate movies similarly?***
+
+So from what we saw above, we can't compare Rotten Tomatoes ratings to IMDB ratings directly, so I'm going to standardize these scores instead. Because I know IMDB is between 1-10 and Rotten Tomatoes is 1-100, I will just multiply IMDB ratings by 10.
+
+For simplicity, we're only going to look at `imdb_rating` for IMDB and the average between `critics_score` and `audience_score` for Rotten Tomatoes.
+
+```{r}
+
+movies <- movies %>% 
+  # Finding average Rotten Tomatoes Score
+  mutate(avg_rt_score = (critics_score+audience_score)/2)
+
+# Making a smaller DataFrame to work with
+rq1 <- movies %>% select(imdb_rating,avg_rt_score)
+# Scaling the data by multiplying IMDB ratings by 10
+scaled_rq1 <- rq1 %>% mutate(imdb_rating = imdb_rating*10)
+# Calculating difference within the "delta" column
+scaled_rq1 <- scaled_rq1 %>% mutate(delta = imdb_rating - avg_rt_score)
+# Plotting
+rq1_delta <- ggplot(scaled_rq1,aes(delta))+geom_histogram()
+rq1_delta + labs(title="Difference between IMDB & Rotten Tomatoes",
+                 x = "IMDB - Rotten Tomatoes", y="Count") +
+            annotate("text",x=28,y=37,label="This is the difference between\n scaled IMDB rating\n and scaled RT score.",)
+```
+
+So looking at the right side of the histogram, we see many more points on the positive side, signaling that IMDB ratings are higher than Rotten Tomatoes ratings.
+
+We can see if the means are statistically significant with a simulation-based inference test.
+
+```{r}
+scaled_rq1_dropped <- droplevels(scaled_rq1)
+melted_scaled_rq1 <- melt(scaled_rq1_dropped,id.vars="delta",measure.vars=c('imdb_rating','avg_rt_score'))
+inference(value,variable,melted_scaled_rq1,"ht","mean",method="theoretical",null=0,alternative="greater")
+```
+
+By looking at the p-value of the test (<`.0001`), we see that the data provide convincing evidence that IMDB ratings are higher than Rotten Tomatoes ratings on average on the contingency that these ratings are comparable. Remember, I scaled `imdb_rating` by multiplying it by 10 to compare it to Rotten Tomatoes.
+
+
+* * *
+
+## Part 4: Modeling
+
+
+```{r}
+# Calculating average score
+movies <- movies %>% mutate(avg_rating = ((imdb_rating*10)+avg_rt_score)/2)
+# Dropping features related to scores/ratings since that's what I want to predict
+cols_to_drop <- cols_to_drop %>% append(c('imdb_rating','avg_rt_score','critics_score','audience_score','imdb_num_votes','audience_rating','critics_rating'))
+
+model_dt <- data.table(select(movies,-cols_to_drop))
+
+
+# One-Hot Encoding the rest of our categorical variables
+model_dt_ohe <- one_hot(model_dt,cols = 'auto',naCols = TRUE,dropCols = TRUE)
+# Tidying up the names
+names(model_dt_ohe) <- make.names(names(model_dt_ohe), unique=TRUE)
+names(model_dt_ohe)
+```
+
+
+```{r}
+# Creating a full model
+model_dt_ohe <- na.omit(model_dt_ohe)
+ols <- lm(avg_rating ~ .,model_dt_ohe)
+```
+
+At this point, we *can* perform model selection by recursively eliminating features based on their p-value. However, I discocered the MASS package, containing a neat function that automates this recursive feature elimination via the AIC (Akaike's Information Criteria), which is a statistic used for model selection. 
+
+The actual mathematics supporting AIC are above my head, but more details can be found [here](https://www.r-bloggers.com/how-do-i-interpret-the-aic/). The main idea is that...
+
+> The lower the AIC, the more parsimonious the model. We can train a full model, and recursively remove features until AIC no longer decreases.
+
+This is what the `stepAIC` function does below, and we effectively return a more simple model with the highest parsimony (simplest/most accurate model) by measure of AIC.
+
+```{r}
+# Recursive Feature Elimination using AIC
+  # trace = 0 to mute the output. Otherwise, the recursions would print and make the notebook output really long
+step <- stepAIC(ols,direction='backward',trace=0)
+
+summary(step)
+```
+
+Above is the simplified model after performing step-wise backward elimination using AIC as the elimination criterion.
+
+### 4.1 Interpretation of the Model
+
+After using decreasing AIC as the criterion for feature elimination, we are *almost* left with features that also happen to be significant predictors by way of their calculated p-values. All of these predictors have p-values less than 5% (except for `dvd_rel_month`, which is a bit over 5%). 
+
+For simplicity's sake, we can interpret this list of features as the most relevant predictors for our linear model for predicting average ratings (averaged between Rotten Tomatoes and IMDB). The intercept is usually not useful, because we cannot predict movie ratings without any of the other features, but I find it interesting that our model's intercept starts at approximately 50, which is objectively a neutral movie rating (since it's between 1-100). 
+
+As for the rest of the features, we can interpret each of them as the following...
+
+> Holding everything else constant, for every increase in a given feature by 1, our model predicts a corresponding average rating by its coefficient.
+
+For example, for every movie that is classified as a drama (`genre_Drama`), our model predicts its average score to increase by 10.611.
+
+Now revisiting Research Question 2, we wondered what were the strongest predictors of ratings. Using smallest p-value as a metric, we can see that `genre_Drama`, `mpaa_rating_PG.13`, and `best_pic_nom` are all the strongest predictors of average movie ratings, which could be biased findings based on our dataset.
+
+### 4.2 Diagnostics
+
+1. Linear Relationships Between X and Y
+For this diagnostic, we will plot a residual plot of errors across numerical explanatory variables.
+
+Looking at the summary of our linear model above, I see that `runtime` and `thtr_rel_year` are the only numerical variables.
+
+```{r}
+# Plotting Residuals against runtime
+runtime_resid <- ggplot(step,aes(model_dt_ohe$runtime,.resid))+geom_jitter()
+runtime_resid + labs(title="Residuals for Runtime", x="Variable: runtime", y="Residuals") +
+  annotate("text",x=240,y=-10,label="Few\nOutliers")
+
+# Plotting Residuals against thtr_rel_year
+thtr_rel_year_resid <- ggplot(step,aes(model_dt_ohe$thtr_rel_year,.resid))+geom_jitter()
+thtr_rel_year_resid + labs(title="Residuals for Theater Release Year", x="Variable: thtr_rel_year", y="Residuals")
+```
+
+So from the plots above, we can see that runtime has a few outliers, but are for the most part linearly related to our response variable `avg_rating` given the random scatter plotting each of these variables against the residuals.
+
+2. Nearly Normal Residual
+
+
+```{r}
+# Using this function for the next two diagnostics
+run_diag <- function(model,bins){
+  # Residual Plot
+  p1 <- ggplot(model,aes(.fitted,.resid)) + geom_jitter()
+  print(p1 + labs(title='Residual Plot')+geom_hline(yintercept = 0))
+  # Distribution of Residuals
+  p2 <- ggplot(model,aes(.resid)) + geom_histogram(bins=bins)
+  print(p2 + labs(title='Distribution of Residuals'))
+  # QQ Plot
+  p3 <- ggplot(model,aes(sample=.resid)) + stat_qq()
+  print(p3 + labs(title='Normal Probability Plot'))
+}
+
+# Refer below these plots for my interpretation of these plots
+run_diag(step,25)
+```
+
+2. Nearly Normal Residuals with mean 0
+
+- By looking at the histogram of our residuals and our quartile-quartile plot, we can see that the residuals are approximately normally distributed with a slight left skew.
+
+3. Constant Variability of residuals
+
+- Looking at the first plot, we can see that our residuals have constant variability until fitted values above 70. After that, it appears the residuals' variability decreases. This is important to consider, since our model may not be as reliable for fitted values above 70 since it's not consistent.
+
+4. Independent Residuals
+
+- This diagnostic can be evaluated in the context of the independence of our observations themselves. Assuming the data was collected truly randomly, we can be comfortable that the residuals are independent of one another.
+
+
+* * *
+
+## Part 5: Prediction
+
+```{r}
+newmovie <- data.frame(title_type_Documentary = 0,
+                      genre_Art.House...International = 0,
+                      genre_Documentary = 0,
+                      genre_Drama = 1,
+                      genre_Musical...Performing.Arts = 0,
+                      genre_Mystery...Suspense = 0,
+                      genre_Other = 0,
+                      runtime = 150,
+                      mpaa_rating_PG = 0,
+                      mpaa_rating_PG.13 = 0,
+                      mpaa_rating_R = 1,
+                      thtr_rel_year = 42, #2012
+                      dvd_rel_month = 2,
+                      best_pic_nom = 1,
+                      best_dir_win = 0,
+                      top200_box = 1)
+
+predict(step,newmovie,interval = "prediction", level = 0.95)
+```
+
+So above I created a fictional movie that has the following characteristics...
+
+- Drama
+- Runtime: 150 mins
+- Rated R
+- Released in 2012 (42 after scaled)
+- Released in February
+- Nominated Best Picture
+- Top 200 box office
+
+And the model predicted an average rating of 90.47 between IMDB and Rotten Tomatoes. However, considering the 95% confidence interval constructed from our prediction, we see, more specifically, that our model predicts that the rating will be between 63.27 and 100 (117.68 is out of bounds - we cannot get a movie with higher than an average rating of 100) with 95% confidence, indicating that our model may not be very reliable.
+
+Additionally, note that the final 2 features wouldn't be known in a real world situation, but model implementation/practicability isn't really the focus of this project.
+
+* * *
+
+## Part 6: Conclusion
+
+In conclusion, we explored our data to identify whether ratings were different between IMDB and Rotten Tomatoes, and we found, through statistical inference testing, that IMDB ratings tend to have be higher than those of Rotten Tomatoes. 
+
+We also fit a linear model onto our dataset and recursively eliminated features based on AIC (not p-value or Adj R-Squared), and found that `genre_Drama`, `mpaa_rating_PG.13`, and `best_pic_nom` are all the strongest predictors of average movie ratings.
+
+However, using our model to predict  an interval for a fictional observation showed us that our model may not be very accurate, given its 95% prediction interval is very wide.
