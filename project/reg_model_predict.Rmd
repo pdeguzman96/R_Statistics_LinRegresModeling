@@ -159,8 +159,8 @@ movies <- movies %>% mutate(avg_rating = ((imdb_rating*10)+avg_rt_score)/2)
 # Dropping features related to scores/ratings since that's what I want to predict
 cols_to_drop <- cols_to_drop %>% append(c('imdb_rating','avg_rt_score','critics_score','audience_score','imdb_num_votes','audience_rating','critics_rating'))
 
+# Dropping unwanted columns
 model_dt <- data.table(select(movies,-cols_to_drop))
-
 
 # One-Hot Encoding the rest of our categorical variables
 model_dt_ohe <- one_hot(model_dt,cols = 'auto',naCols = TRUE,dropCols = TRUE)
@@ -171,12 +171,12 @@ names(model_dt_ohe)
 
 
 ```{r}
-# Creating a full model
+# Creating a full model omitting NA values
 model_dt_ohe <- na.omit(model_dt_ohe)
 ols <- lm(avg_rating ~ .,model_dt_ohe)
 ```
 
-At this point, we *can* perform model selection by recursively eliminating features based on their p-value. However, I discocered the MASS package, containing a neat function that automates this recursive feature elimination via the AIC (Akaike's Information Criteria), which is a statistic used for model selection. 
+At this point, we *can* perform model selection by recursively eliminating features based on their p-value. However, I discovered the MASS package, containing a neat function that automates this recursive feature elimination via the AIC (Akaike's Information Criteria), which is a statistic used for model selection. 
 
 The actual mathematics supporting AIC are above my head, but more details can be found [here](https://www.r-bloggers.com/how-do-i-interpret-the-aic/). The main idea is that...
 
@@ -267,6 +267,7 @@ run_diag(step,25)
 ## Part 5: Prediction
 
 ```{r}
+# Moonlight Data
 newmovie <- data.frame(title_type_Documentary = 0,
                       genre_Art.House...International = 0,
                       genre_Documentary = 0,
@@ -274,12 +275,12 @@ newmovie <- data.frame(title_type_Documentary = 0,
                       genre_Musical...Performing.Arts = 0,
                       genre_Mystery...Suspense = 0,
                       genre_Other = 0,
-                      runtime = 150,
+                      runtime = 110,
                       mpaa_rating_PG = 0,
                       mpaa_rating_PG.13 = 0,
                       mpaa_rating_R = 1,
-                      thtr_rel_year = 42, #2012
-                      dvd_rel_month = 2,
+                      thtr_rel_year = 46, #corresponds to 2016
+                      dvd_rel_month = 11,
                       best_pic_nom = 1,
                       best_dir_win = 0,
                       top200_box = 1)
@@ -287,17 +288,17 @@ newmovie <- data.frame(title_type_Documentary = 0,
 predict(step,newmovie,interval = "prediction", level = 0.95)
 ```
 
-So above I created a fictional movie that has the following characteristics...
+So above I created data for Moonlight, a 2016 drama nominated for best picture that has the following characteristics from our model's perspective...
 
 - Drama
-- Runtime: 150 mins
+- Runtime: 110 mins
 - Rated R
-- Released in 2012 (42 after scaled)
-- Released in February
+- Released in 2016 (46 after scaled)
+- Released in November
 - Nominated Best Picture
 - Top 200 box office
 
-And the model predicted an average rating of 90.47 between IMDB and Rotten Tomatoes. However, considering the 95% confidence interval constructed from our prediction, we see, more specifically, that our model predicts that the rating will be between 63.27 and 100 (117.68 is out of bounds - we cannot get a movie with higher than an average rating of 100) with 95% confidence, indicating that our model may not be very reliable.
+And the model predicted an average rating of 88.60 between IMDB and Rotten Tomatoes. However, considering the 95% confidence interval constructed from our prediction, we see, more specifically, that our model predicts that the rating will be between 61.34 and 100 (117.68 is out of bounds - we cannot get a movie with higher than an average rating of 100) with 95% confidence, indicating that our model may not be very reliable.
 
 Additionally, note that the final 2 features wouldn't be known in a real world situation, but model implementation/practicability isn't really the focus of this project.
 
@@ -309,4 +310,6 @@ In conclusion, we explored our data to identify whether ratings were different b
 
 We also fit a linear model onto our dataset and recursively eliminated features based on AIC (not p-value or Adj R-Squared), and found that `genre_Drama`, `mpaa_rating_PG.13`, and `best_pic_nom` are all the strongest predictors of average movie ratings.
 
-However, using our model to predict  an interval for a fictional observation showed us that our model may not be very accurate, given its 95% prediction interval is very wide.
+A few notes on some shortcomings/limitations...
+
+Using our model to predict  an interval for a fictional observation showed us that our model may not be very accurate, given its 95% prediction interval is very wide. Also note that this model may have performed better using additional features and data. It's strange that `genre_Drama` was such a significant predictor of ratings, but this may be in indication of imbalance/misrepresentation in our dataset. Finally, we used some features like `best_pic_nom` to predict ratings, when in reality, this would not be known at the time ratings would need to be predicted from a practical standpoint.
